@@ -59,9 +59,10 @@ require('Header.php');
 		left: 0;
 		width: 100%;
 		height: 100%;
-		background-color: rgba(255, 255, 255, 0.8);
+		background-color: rgba(255, 255, 255, 0.85);
 		align-items: center;
 		justify-content: center;
+		flex-direction: column;
 		z-index: 9999;
 	}
 
@@ -528,7 +529,9 @@ require('Header.php');
 						</form>
 						<div id="processingPopup">
 							<div class="spinner"></div>
-							<button type="button" style="margin-top:100px;margin-left:-80px;display:none" id="cancel-request" class="btn btn-danger" onClick="cancelRequest()">Cancel Request</button>
+							<p id="jobStatusMsg" style="margin-top:20px; font-size:16px; color:#333; font-weight:bold; text-align:center; background:rgba(255,255,255,0.93); padding:8px 18px; border-radius:8px; max-width:440px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">Initializing...</p>
+							<p id="jobElapsedMsg" style="display: none;"></p>
+							<button type="button" style="margin-top:20px;display:none" id="cancel-request" class="btn btn-danger" onClick="cancelRequest()">Cancel Request</button>
 						</div>
 						&nbsp
 						<div class="row">
@@ -713,6 +716,210 @@ require('Header.php');
 
 <script>
 	let controller;
+	const CG_JOB_KEY = 'cg_job_unique_key_leg2';
+	const JOB_ENDPOINT = '/processFile';
+	const clientId = '<?php echo isset($_SESSION["user"]) ? $_SESSION["user"] : "admin"; ?>';
+
+	let pollingInterval = null;
+	window.isJobActive = false;
+
+	function startJobPolling(jobId, storageKey, onComplete) {
+		window.isJobActive = true;
+		if (pollingInterval) clearInterval(pollingInterval);
+
+		checkStatus();
+		pollingInterval = setInterval(checkStatus, 5000);
+
+		function checkStatus() {
+			fetch(pythonUrl + 'job_status/' + jobId)
+				.then(response => {
+					if (!response.ok) throw new Error('Status connection error');
+					return response.json();
+				})
+				.then(job => {
+					if (job.status === 'completed') {
+						clearInterval(pollingInterval);
+						pollingInterval = null;
+						window.isJobActive = false;
+						updateJobStatusMsg('Processing completed', '');
+
+						fetch(pythonUrl + 'job_result/' + jobId)
+							.then(r => r.json())
+							.then(result => {
+								clearJobState(storageKey);
+								onComplete(result);
+								document.getElementById("processingPopup").style.display = "none";
+								document.getElementById("cancel-request").style.display = "none";
+							})
+							.catch(err => {
+								alert('Failed to retrieve job results.');
+								resetUIState();
+							});
+					} else if (job.status === 'failed') {
+						clearInterval(pollingInterval);
+						pollingInterval = null;
+						window.isJobActive = false;
+						alert('Job failed: ' + (job.message || 'unknown error'));
+						resetUIState();
+					} else {
+						window.isJobActive = true;
+						const displayMsg = job.message ? job.message.charAt(0).toUpperCase() + job.message.slice(1) : 'Processing...';
+						updateJobStatusMsg(displayMsg, '');
+					}
+				})
+				.catch(err => {
+					updateJobStatusMsg('Reconnecting...', '');
+				});
+		}
+	}
+
+	function saveJobState(key, jobId, endpoint, params) {
+		const state = {
+			jobId: jobId,
+			endpoint: endpoint,
+			params: params,
+			startTime: Date.now()
+		};
+		localStorage.setItem(key, JSON.stringify(state));
+	}
+
+	function clearJobState(key) {
+		localStorage.removeItem(key);
+	}
+
+	function updateJobStatusMsg(msg, elapsed) {
+		const statusEl = document.getElementById('jobStatusMsg');
+		if (statusEl) statusEl.textContent = msg;
+	}
+
+	function resetUIState() {
+		window.isJobActive = false;
+		clearJobState(CG_JOB_KEY);
+		document.getElementById("processingPopup").style.display = "none";
+		document.getElementById("cancel-request").style.display = "none";
+		var toggleButton = document.querySelector('.toggle');
+		if (toggleButton) {
+			toggleButton.classList.remove('toggle--on');
+			toggleButton.classList.add('toggle--off');
+			toggleButton.setAttribute('data-content', 'Off');
+		}
+	}
+
+	function hideProcessingPopup() {
+		if (!window.isJobActive) {
+			document.getElementById("processingPopup").style.display = "none";
+		}
+	}
+
+	function checkForActiveJob(storageKey, endpoint, onComplete) {
+		const stateStr = localStorage.getItem(storageKey);
+		if (stateStr) {
+			try {
+				const state = JSON.parse(stateStr);
+				if (state.jobId && state.endpoint === endpoint) {
+					window.isJobActive = true;
+					document.getElementById("processingPopup").style.display = "flex";
+					document.getElementById("cancel-request").style.display = "block";
+					updateJobStatusMsg('Re-attaching to job...', '');
+					startJobPolling(state.jobId, storageKey, onComplete);
+					return;
+				}
+			} catch (e) {
+				clearJobState(storageKey);
+			}
+		}
+
+		fetch(pythonUrl + 'active_job?client_id=' + encodeURIComponent(clientId) + '&endpoint=' + encodeURIComponent(endpoint))
+			.then(response => {
+				if (!response.ok) throw new Error('Network error');
+				return response.json();
+			})
+			.then(data => {
+				if (data.has_active && data.job_id) {
+					window.isJobActive = true;
+					document.getElementById("processingPopup").style.display = "flex";
+					document.getElementById("cancel-request").style.display = "block";
+					updateJobStatusMsg(data.message || 'Restoring job status...', '');
+					
+					saveJobState(storageKey, data.job_id, endpoint, {});
+					startJobPolling(data.job_id, storageKey, onComplete);
+				}
+			})
+			.catch(err => {
+				console.error('Error fetching active job:', err);
+			});
+	}
+
+	function displayResults(data) {
+		document.getElementById("optimisedtable").innerHTML = "";
+		document.getElementById("optimisedtable").style.display = "";
+		document.getElementById("processingPopup").style.display = "none";
+		document.getElementById("cancel-request").style.display = "none";
+		
+		var thead = document.createElement("thead");
+		var headerRow = document.createElement("tr");
+		var headers = ["Scenario", "WH_Used", "FPS_Used", "Total_Allocation", "Total_QKM", "Average Distance"];
+		headers.forEach(function(headerText) {
+			var th = document.createElement("th");
+			th.textContent = headerText;
+			headerRow.appendChild(th);
+		});
+		thead.appendChild(headerRow);
+		var table = document.getElementById("optimisedtable");
+		table.appendChild(thead);
+
+		var newRow = table.insertRow();
+
+		var cell1 = newRow.insertCell(0);
+		var cell2 = newRow.insertCell(1);
+		var cell3 = newRow.insertCell(2);
+		var cell4 = newRow.insertCell(3);
+		var cell5 = newRow.insertCell(4);
+		var cell6 = newRow.insertCell(5);
+		
+
+		cell1.innerHTML = data["Scenario"];
+		cell2.innerHTML = data["WH_Used"];
+		cell3.innerHTML = formatNumberWithCommas(data["FPS_Used"]);
+		cell4.innerHTML = formatNumberWithCommas(data["Demand"]);
+		cell5.innerHTML = formatNumberWithCommas(data["Total_QKM"]);
+		cell6.innerHTML = formatNumberWithCommas(data["Average_Distance"]);
+		
+		var newRow = table.insertRow();
+
+		var cell1 = newRow.insertCell(0);
+		var cell2 = newRow.insertCell(1);
+		var cell3 = newRow.insertCell(2);
+		var cell4 = newRow.insertCell(3);
+		var cell5 = newRow.insertCell(4);
+		var cell6 = newRow.insertCell(5);
+
+		cell1.innerHTML = "Baseline";
+		cell2.innerHTML = "31";
+		cell3.innerHTML = "1,837";
+		cell4.innerHTML = "62,606";
+		cell5.innerHTML ="44,37,321";
+		cell6.innerHTML = "70.88";
+		
+		table.style.width = "100%";
+		table.style.padding = "20px";
+		table.style.marginBottom = "50px";
+		table.style.fontSize = "20px"; 
+		table.style.marginLeft = "20px";
+		table.style.color = "black";
+		table.style.textAlign = "center";
+
+		var tableHeaders = table.getElementsByTagName('th');
+		for (var i = 0; i < tableHeaders.length; i++) {
+			tableHeaders[i].style.fontSize = "20px";
+		}
+		var toggleButton = document.querySelector('.toggle');
+		if (toggleButton) {
+			toggleButton.classList.remove('toggle--on');
+			toggleButton.classList.add('toggle--off');
+			toggleButton.setAttribute('data-content', 'Off');
+		}
+	}
 
 	function checkServerStatus() {
 		// Make an AJAX request to your Python server
@@ -988,7 +1195,6 @@ require('Header.php');
 		  }
 		});
 		
-		
 		if(selectedValues.length==0){
 			alert("Please Select Applicable Month");
 			var toggleButton = document.querySelector('.toggle');
@@ -1002,99 +1208,33 @@ require('Header.php');
 		const signal = controller.signal;
 
 		formData.append('applicable', selectedValues);
+		formData.append('async', '1');
+		formData.append('client_id', clientId);
+
 		document.getElementById("processingPopup").style.display = "flex";
 		document.getElementById("cancel-request").style.display = "flex";
+		updateJobStatusMsg('Initializing job...', '');
+
 		fetchPromise = fetch(pythonUrl + 'processFile', {
 			method: 'POST',
 			body: formData,
 			signal: signal,
 			timeout: 14400000
 		})
-			.then(response => response.json())
-			.then(data => {
-				document.getElementById("optimisedtable").innerHTML = "";
-				document.getElementById("optimisedtable").style.display = "";
-				document.getElementById("processingPopup").style.display = "none";
-				document.getElementById("cancel-request").style.display = "none";
-				
-				
-				var thead = document.createElement("thead");
-				var headerRow = document.createElement("tr");
-				var headers = ["Scenario", "WH_Used", "FPS_Used", "Total_Allocation", "Total_QKM", "Average Distance"];
-				headers.forEach(function(headerText) {
-					var th = document.createElement("th");
-					th.textContent = headerText;
-					headerRow.appendChild(th);
-				});
-				thead.appendChild(headerRow);
-				var table = document.getElementById("optimisedtable");
-				table.appendChild(thead);
-
-				var newRow = table.insertRow();
-
-				var cell1 = newRow.insertCell(0);
-				var cell2 = newRow.insertCell(1);
-				var cell3 = newRow.insertCell(2);
-				var cell4 = newRow.insertCell(3);
-				var cell5 = newRow.insertCell(4);
-				var cell6 = newRow.insertCell(5);
-				
-
-				cell1.innerHTML = data["Scenario"];
-				cell2.innerHTML = data["WH_Used"];
-				cell3.innerHTML = formatNumberWithCommas(data["FPS_Used"]);
-				cell4.innerHTML = formatNumberWithCommas(data["Demand"]);
-				cell5.innerHTML = formatNumberWithCommas(data["Total_QKM"]);
-				cell6.innerHTML = formatNumberWithCommas(data["Average_Distance"]);
-				
-				var newRow = table.insertRow();
-
-				var cell1 = newRow.insertCell(0);
-				var cell2 = newRow.insertCell(1);
-				var cell3 = newRow.insertCell(2);
-				var cell4 = newRow.insertCell(3);
-				var cell5 = newRow.insertCell(4);
-				var cell6 = newRow.insertCell(5);
-
-				cell1.innerHTML = "Baseline";
-				cell2.innerHTML = "31";
-				cell3.innerHTML = "1,837";
-				cell4.innerHTML = "62,606";
-				cell5.innerHTML ="44,37,321";
-				cell6.innerHTML = "70.88";
-				
-			table.style.width = "100%";
-			table.style.padding = "20px";
-			table.style.marginBottom = "50px";
-			table.style.fontSize = "20px"; 
-			table.style.marginLeft = "20px"; // Add margin-left
-			table.style.color = "black"; // Add margin-left
-			table.style.textAlign = "center";
-
-			var tableHeaders = table.getElementsByTagName('th');
-			for (var i = 0; i < tableHeaders.length; i++) {
-				tableHeaders[i].style.fontSize = "20px"; // Increase font size for headers
+		.then(response => response.json())
+		.then(data => {
+			if (data.job_id) {
+				saveJobState(CG_JOB_KEY, data.job_id, JOB_ENDPOINT, {});
+				startJobPolling(data.job_id, CG_JOB_KEY, displayResults);
+			} else {
+				alert('Failed to dispatch job: ' + (data.message || 'Unknown error'));
+				resetUIState();
 			}
-			//toggleImage(); // Call the toggleImage function after displaying the table
-			var toggleButton = document.querySelector('.toggle');
-			toggleButton.classList.remove('toggle--on');
-			toggleButton.classList.add('toggle--off');
-			toggleButton.setAttribute('data-content', 'Off');
-
-			//toggleTableAndDownloadButton(); // Call the function to show/hide download button
 		})
 		.catch(error => {
 			alert("Error in Processing");
-			var toggleButton = document.querySelector('.toggle');
-			toggleButton.classList.remove('toggle--on');
-			toggleButton.classList.add('toggle--off');
-			toggleButton.setAttribute('data-content', 'Off');
-
+			resetUIState();
 			console.error('Error:', error);
-		})
-		.finally(() => {
-			document.getElementById("processingPopup").style.display = "none";
-			document.getElementById("cancel-request").style.display = "none";
 		});
 	}
 	
@@ -1381,6 +1521,7 @@ function showCheckboxes() {
 }
 var firstStart = 0;
 fetchFromDb();
+checkForActiveJob(CG_JOB_KEY, JOB_ENDPOINT, displayResults);
 
 </script>
 </body>

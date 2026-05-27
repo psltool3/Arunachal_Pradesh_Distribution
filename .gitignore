@@ -1,3 +1,6 @@
 *.log
-
 logs/
+*.csv
+*.db
+*.xlsx
+*.exe

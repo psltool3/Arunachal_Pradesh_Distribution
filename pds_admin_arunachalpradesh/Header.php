@@ -14,7 +14,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
 
 		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js" integrity="sha384-xBuQ/xzmlsLoJpyjoggmTEz8OWUFM0/RC5BsqQBDX2v5cMvDHcMakNTNrHIW2I5f" crossorigin="anonymous"></script>
 		<!-- <script> var pythonUrl = "http://10.0.104.37/api/"; var directory = "" </script>  -->
-		<script> var pythonUrl = "http://10.0.104.37/api/"; var directory = "" </script> 
+		<script> var pythonUrl = "http://localhost:5000/"; var directory = "" </script> 
 
 		
 								
